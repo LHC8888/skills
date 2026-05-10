@@ -1,1 +1,1 @@
-some skill for agents
+some skills for agents
