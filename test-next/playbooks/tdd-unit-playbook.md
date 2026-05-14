@@ -32,12 +32,13 @@
 
 ```text
 - id
-- priority
-- severity_if_fail
-- blocker_if_fail
+- level（L0-L4，影响面，按 SKILL.md §1.4 判定）
+- priority（P0/P1/P2，修复优先级，按 SKILL.md §2.2 判定）
 - expectation
 - executor=vitest
 ```
+
+（其余字段见 SKILL.md §2.1）
 
 ### Step 2 测后更新任务
 
@@ -57,7 +58,7 @@
 2. 一般
 3. 轻微
 
-若任务是“严重 + blocker_if_fail=true”，必须标注“必须修复”，不得进入可交付结论。
+若存在“严重 + 阻塞主流程”，必须标注“必须修复”，不得进入可交付结论。
 
 ## 回退策略
 

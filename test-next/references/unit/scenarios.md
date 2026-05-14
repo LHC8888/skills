@@ -2,7 +2,7 @@
 
 本表给“最小可执行任务模板”，用于直接产出任务而不是只给方向。
 
-## 1) 纯函数 / utility
+## 1. 纯函数 / utility
 
 最小任务集：
 
@@ -21,7 +21,7 @@
 执行：Vitest
 ```
 
-## 2) React 组件（Testing Library）
+## 2. React 组件（Testing Library）
 
 最小任务集：
 
@@ -40,7 +40,7 @@
 执行：Vitest + @testing-library/react
 ```
 
-## 3) React hook（renderHook）
+## 3. React hook（renderHook）
 
 最小任务集：
 
@@ -59,7 +59,7 @@
 执行：Vitest + renderHook + fakeTimers
 ```
 
-## 4) Service / tRPC procedure
+## 4. Service / tRPC procedure
 
 最小任务集：
 
@@ -78,7 +78,7 @@
 执行：Vitest + mock ctx
 ```
 
-## 5) 异步函数
+## 5. 异步函数
 
 最小任务集：
 
@@ -86,7 +86,7 @@
 - reject
 - timeout 或 cancel（至少其一）
 
-## 6) 状态机 / 复杂逻辑
+## 6. 状态机 / 复杂逻辑
 
 最小任务集：
 
@@ -94,20 +94,9 @@
 - 至少 1 条非法转移拒绝
 - 1 条中断恢复或并发协调
 
-## 7) 输出口径（与 harness 对齐）
+## 7. 输出口径（与 harness 对齐）
 
-生成任务时必须含：
+字段定义见 SKILL.md §2.1（统一来源，本文件不重复）。Vitest 特定的 evidence 形式：
 
-- `id`
-- `priority`
-- `severity_if_fail`
-- `blocker_if_fail`
-- `expectation`
-- `executor`
-
-执行后回填：
-
-- `status`
-- `evidence`（Vitest summary + stack）
-- `notes`
+- `evidence`: Vitest summary + stack（失败时包含 `file:line` + 断言期望/实际对比）
 
