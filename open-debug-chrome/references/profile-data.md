@@ -1,6 +1,6 @@
 # Profile 里有什么
 
-完整 Chrome `--user-data-dir`。
+完整 Chrome `--user-data-dir`。调试进程必须跑在 **Google Chrome Debug.app**（`com.google.chrome.debug`）上，不能用日常 `Google Chrome.app`。应用拷贝由 `chrome-debug.sh init`（必要时 `sync-app`）维护，和下面这些 profile 目录是两件事。
 
 | 路径 | 角色 |
 |------|------|

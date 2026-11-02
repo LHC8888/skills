@@ -6,10 +6,16 @@ set -euo pipefail
 SOURCE_PROFILE="${CHROME_DEBUG_PROFILE:-$HOME/.chrome-debug-profile}"
 PROFILE="$SOURCE_PROFILE"
 PORT="${CHROME_DEBUG_PORT:-9222}"
-CHROME_APP="${CHROME_APP:-/Applications/Google Chrome.app}"
+# Daily Chrome must never be the debug binary: same bundle id steals http/https.
+DAILY_CHROME_APP="${CHROME_DEBUG_DAILY_APP:-/Applications/Google Chrome.app}"
+DEBUG_CHROME_APP_DEFAULT="$HOME/Applications/Google Chrome Debug.app"
+DEBUG_BUNDLE_ID="com.google.chrome.debug"
+DAILY_BUNDLE_ID="com.google.Chrome"
+CHROME_APP="${CHROME_APP:-$DEBUG_CHROME_APP_DEFAULT}"
 CHROME_BIN="${CHROME_PATH:-$CHROME_APP/Contents/MacOS/Google Chrome}"
 CDP="http://127.0.0.1:${PORT}"
 PICK_PORT=0
+FORCE=0
 CLONE_ID=""
 CLONE_FROM=""
 # 0 = do not steal desktop focus (macOS open -g); 1 = activate Chrome window
@@ -25,6 +31,7 @@ usage() {
 Usage: $(basename "$0") <command> [flags]
 
 Commands:
+  init                First-run / upgrade: ensure Debug.app exists, isolated, up to date
   status              Show port / CDP / profile state
   start               Start debug Chrome for source PROFILE
   clone-start         Copy source → \$SOURCE_PROFILE-<N>, pick free port, start
@@ -32,6 +39,7 @@ Commands:
   cleanup-clones      Stop+delete all numbered clones; keep source PROFILE only
   list-extensions     List extension dirs that would be loaded at start
   sync-extensions     Copy extension files from EXTENSIONS_FROM into source profile
+  sync-app            Force-copy daily Chrome.app → Google Chrome Debug.app (new bundle id)
   stop                Stop Chrome for current PROFILE (or --id <N> clone)
   reset-profile       stop + delete source PROFILE (asks for confirmation)
   doctor              Environment self-check
@@ -49,13 +57,15 @@ Extensions:
 Env:
   CHROME_DEBUG_PROFILE          default: ~/.chrome-debug-profile  (source / primary)
   CHROME_DEBUG_PORT             default: 9222
-  CHROME_APP                    default: /Applications/Google Chrome.app
+  CHROME_APP                    default: ~/Applications/Google Chrome Debug.app
   CHROME_PATH                   default: \$CHROME_APP/Contents/MacOS/Google Chrome
+  CHROME_DEBUG_DAILY_APP        default: /Applications/Google Chrome.app (sync-app source only)
   CHROME_DEBUG_STEAL_FOCUS      default: 0 (keep current app focused); set 1 to activate Chrome
   CHROME_DEBUG_LOAD_EXTENSIONS  default: 1 (pass --load-extension); set 0 to disable
   CHROME_DEBUG_EXTENSIONS_FROM  default: ~/Library/Application Support/Google/Chrome/Default/Extensions
 
 Flags:
+  --force             init/sync-app: recopy Debug.app even if version already matches
   --pick-port         On start, if PORT is busy, scan PORT..PORT+30 for a free port
   --id <N>            clone-start: use this number (default: next free)
                       stop / list: target \$SOURCE_PROFILE-<N>
@@ -66,6 +76,100 @@ EOF
 
 log() { printf '%s\n' "$*"; }
 err() { printf 'ERROR: %s\n' "$*" >&2; }
+
+app_bundle_id() {
+  local app="$1"
+  [[ -d "$app" ]] || return 1
+  defaults read "$app/Contents/Info" CFBundleIdentifier 2>/dev/null || return 1
+}
+
+app_version() {
+  local app="$1"
+  [[ -d "$app" ]] || return 1
+  defaults read "$app/Contents/Info" CFBundleShortVersionString 2>/dev/null || return 1
+}
+
+debug_app_dest() {
+  if [[ "$CHROME_APP" == "$DAILY_CHROME_APP" ]]; then
+    printf '%s\n' "$DEBUG_CHROME_APP_DEFAULT"
+  else
+    printf '%s\n' "$CHROME_APP"
+  fi
+}
+
+# PIDs whose argv starts with dest/Contents/MacOS/Google Chrome (not this shell).
+debug_app_pids() {
+  local dest="$1"
+  local needle="$dest/Contents/MacOS/Google Chrome"
+  local pid cmd
+  local pids
+  pids="$(pgrep -x "Google Chrome" 2>/dev/null || true)"
+  [[ -z "$pids" ]] && return 0
+  for pid in $pids; do
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    case "$cmd" in
+      "$needle"|"$needle "*) printf '%s\n' "$pid" ;;
+    esac
+  done
+}
+
+# missing | wrong-bundle | stale | ok
+debug_app_state() {
+  local dest="$1"
+  local bid ver daily
+  if [[ ! -d "$dest" || ! -x "$dest/Contents/MacOS/Google Chrome" ]]; then
+    echo missing
+    return 0
+  fi
+  bid="$(app_bundle_id "$dest" || true)"
+  if [[ "$bid" == "$DAILY_BUNDLE_ID" || -z "$bid" ]]; then
+    echo wrong-bundle
+    return 0
+  fi
+  if [[ "$bid" != "$DEBUG_BUNDLE_ID" ]]; then
+    echo ok
+    return 0
+  fi
+  ver="$(app_version "$dest" || true)"
+  daily="$(app_version "$DAILY_CHROME_APP" || true)"
+  if [[ -n "$daily" && -n "$ver" && "$daily" != "$ver" ]]; then
+    echo stale
+    return 0
+  fi
+  echo ok
+}
+
+# Refuse to launch daily Google Chrome.app — it hijacks http/https from the real browser.
+require_isolated_chrome() {
+  if [[ ! -d "$CHROME_APP" || ! -x "$CHROME_BIN" ]]; then
+    err "Debug Chrome app not found: $CHROME_APP"
+    err "Run init (copies daily Chrome.app, does not reinstall):"
+    err "  $0 init"
+    exit 1
+  fi
+  local bid
+  bid="$(app_bundle_id "$CHROME_APP" || true)"
+  if [[ "$bid" == "$DAILY_BUNDLE_ID" ]]; then
+    err "Refusing to launch daily Chrome ($CHROME_APP, bundle $bid)."
+    err "That binary owns http/https on macOS; debug instances steal app hyperlinks."
+    err "Use Google Chrome Debug.app (bundle $DEBUG_BUNDLE_ID):"
+    err "  $0 init"
+    exit 1
+  fi
+  if [[ -z "$bid" ]]; then
+    err "Could not read CFBundleIdentifier from $CHROME_APP"
+    exit 1
+  fi
+}
+
+plist_set_or_add_string() {
+  local plist="$1" key="$2" value="$3"
+  if /usr/libexec/PlistBuddy -c "Print :$key" "$plist" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Set :$key ${value}" "$plist"
+  else
+    /usr/libexec/PlistBuddy -c "Add :$key string ${value}" "$plist"
+  fi
+}
 
 sync_cdp() {
   CDP="http://127.0.0.1:${PORT}"
@@ -317,10 +421,7 @@ cmd_sync_extensions() {
 }
 
 launch_chrome() {
-  if [[ ! -x "$CHROME_BIN" ]]; then
-    err "Chrome not found at: $CHROME_BIN (set CHROME_PATH)"
-    exit 1
-  fi
+  require_isolated_chrome
   mkdir -p "$PROFILE"
   sync_cdp
 
@@ -365,13 +466,13 @@ launch_chrome() {
   fi
 
   local i
-  for i in $(seq 1 20); do
+  for i in $(seq 1 40); do
     if cdp_ok; then
       log "CDP ready: $CDP"
       cmd_status
       return 0
     fi
-    sleep 0.3
+    sleep 0.4
   done
 
   err "Chrome started but CDP not reachable at $CDP"
@@ -483,6 +584,12 @@ cmd_status() {
   log "CDP=$CDP"
   log "CHROME_APP=$CHROME_APP"
   log "CHROME_BIN=$CHROME_BIN"
+  log "DAILY_CHROME_APP=$DAILY_CHROME_APP"
+  local bid
+  bid="$(app_bundle_id "$CHROME_APP" || true)"
+  if [[ -n "$bid" ]]; then
+    log "chrome_bundle_id=$bid"
+  fi
   log "STEAL_FOCUS=$STEAL_FOCUS"
   log "LOAD_EXTENSIONS=$LOAD_EXTENSIONS"
   log "EXTENSIONS_FROM=$EXTENSIONS_FROM"
@@ -534,6 +641,7 @@ print(sum(1 for t in tabs if t.get("type")=="page"))' 2>/dev/null || echo '?')"
 }
 
 cmd_start() {
+  ensure_debug_app_for_launch
   PROFILE="$SOURCE_PROFILE"
   if port_busy; then
     if our_debug_instance && cdp_ok; then
@@ -562,6 +670,7 @@ cmd_start() {
 }
 
 cmd_clone_start() {
+  ensure_debug_app_for_launch
   local src="${CLONE_FROM:-$SOURCE_PROFILE}"
   local id="$CLONE_ID"
   if [[ -z "$id" ]]; then
@@ -745,10 +854,146 @@ cmd_reset_profile() {
   log "Profile removed: $SOURCE_PROFILE"
 }
 
+cmd_sync_app() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    err "sync-app is macOS-only"
+    exit 1
+  fi
+  if [[ ! -d "$DAILY_CHROME_APP" ]]; then
+    err "Daily Chrome not found: $DAILY_CHROME_APP"
+    exit 1
+  fi
+  local dest
+  dest="$(debug_app_dest)"
+  CHROME_APP="$dest"
+  CHROME_BIN="${CHROME_PATH:-$CHROME_APP/Contents/MacOS/Google Chrome}"
+
+  local daily_bid
+  daily_bid="$(app_bundle_id "$DAILY_CHROME_APP" || true)"
+  if [[ "$daily_bid" != "$DAILY_BUNDLE_ID" ]]; then
+    err "Source is not daily Chrome (bundle $daily_bid): $DAILY_CHROME_APP"
+    exit 1
+  fi
+
+  local running
+  running="$(debug_app_pids "$dest" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  if [[ -n "$running" ]]; then
+    err "Debug Chrome is running (pids: $running). Stop it first:"
+    err "  $0 stop"
+    err "  $0 cleanup-clones"
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$dest")"
+  log "Copying $DAILY_CHROME_APP ($(app_version "$DAILY_CHROME_APP")) -> $dest"
+  ditto "$DAILY_CHROME_APP" "$dest"
+
+  local plist="$dest/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $DEBUG_BUNDLE_ID" "$plist"
+  plist_set_or_add_string "$plist" CFBundleName "Chrome Debug"
+  plist_set_or_add_string "$plist" CFBundleDisplayName "Google Chrome Debug"
+  if /usr/libexec/PlistBuddy -c 'Print :KSProductID' "$plist" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Set :KSProductID $DEBUG_BUNDLE_ID" "$plist"
+  fi
+  if /usr/libexec/PlistBuddy -c 'Print :KSUpdateURL' "$plist" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c 'Set :KSUpdateURL' "$plist" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c 'Set :KSUpdateURL ""' "$plist"
+  fi
+
+  xattr -cr "$dest" 2>/dev/null || true
+  log "Ad-hoc codesign..."
+  codesign --force --deep --sign - "$dest"
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$dest"
+
+  log "sync_app_done dest=$dest bundle=$(app_bundle_id "$dest")"
+  log "version=$(app_version "$dest")"
+  log "daily Chrome is unchanged: $DAILY_CHROME_APP"
+}
+
+cmd_init() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    err "init is macOS-only"
+    exit 1
+  fi
+  local dest state daily_ver debug_ver bid
+  dest="$(debug_app_dest)"
+  CHROME_APP="$dest"
+  CHROME_BIN="${CHROME_PATH:-$CHROME_APP/Contents/MacOS/Google Chrome}"
+  state="$(debug_app_state "$dest")"
+  daily_ver="$(app_version "$DAILY_CHROME_APP" || echo '?')"
+  debug_ver="$(app_version "$dest" || echo '?')"
+  bid="$(app_bundle_id "$dest" || echo '?')"
+
+  log "init dest=$dest"
+  log "init daily_version=$daily_ver debug_version=$debug_ver bundle=$bid state=$state"
+
+  local need_copy=0
+  if [[ "$FORCE" -eq 1 ]]; then
+    need_copy=1
+    log "init: --force recopy"
+  elif [[ "$state" == "missing" || "$state" == "wrong-bundle" || "$state" == "stale" ]]; then
+    need_copy=1
+  fi
+
+  if [[ "$need_copy" -eq 1 ]]; then
+    local running
+    running="$(debug_app_pids "$dest" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    if [[ -n "$running" ]]; then
+      err "Need to recopy Debug.app (state=$state) but it is running (pids: $running)."
+      err "  $0 stop && $0 init"
+      exit 1
+    fi
+    cmd_sync_app
+    state="$(debug_app_state "$dest")"
+    debug_ver="$(app_version "$dest" || echo '?')"
+    bid="$(app_bundle_id "$dest" || echo '?')"
+  else
+    log "init: skip copy (already isolated and current)"
+  fi
+
+  require_isolated_chrome
+  mkdir -p "$SOURCE_PROFILE"
+  log "init: ready bundle=$bid version=$debug_ver profile=$SOURCE_PROFILE"
+  if [[ "$state" != "ok" ]]; then
+    err "init finished but debug app state is $state"
+    exit 1
+  fi
+}
+
+ensure_debug_app_for_launch() {
+  local dest state
+  dest="$(debug_app_dest)"
+  CHROME_APP="$dest"
+  CHROME_BIN="${CHROME_PATH:-$CHROME_APP/Contents/MacOS/Google Chrome}"
+  state="$(debug_app_state "$dest")"
+  if [[ "$state" == "missing" || "$state" == "wrong-bundle" ]]; then
+    log "debug app $state — running init"
+    cmd_init
+  fi
+  require_isolated_chrome
+}
+
 cmd_doctor() {
   cmd_status
   log "---"
-  log "daily_chrome_note: keep daily Chrome open; this profile is isolated"
+  local dest state bid
+  dest="$(debug_app_dest)"
+  state="$(debug_app_state "$dest")"
+  bid="$(app_bundle_id "$dest" || true)"
+  log "init_state: $state dest=$dest daily=$(app_version "$DAILY_CHROME_APP" || echo '?') debug=$(app_version "$dest" || echo '?')"
+  if [[ "$state" == "missing" ]]; then
+    log "isolated_app: MISSING — run: $0 init"
+  elif [[ "$state" == "wrong-bundle" ]]; then
+    log "isolated_app: FAIL launching daily Chrome would steal hyperlinks — run: $0 init"
+  elif [[ "$state" == "stale" ]]; then
+    log "isolated_app: STALE bundle=$bid — run: $0 init (stop debug Chrome first)"
+  elif [[ "$bid" == "$DEBUG_BUNDLE_ID" ]]; then
+    log "isolated_app: ok bundle=$bid"
+  else
+    log "isolated_app: ok (custom bundle $bid)"
+  fi
+  log "hyperlink_note: http/https must stay on daily Chrome ($DAILY_BUNDLE_ID); debug uses $DEBUG_BUNDLE_ID"
+  log "daily_chrome_note: keep daily Chrome open; debug app + profile are both isolated"
   log "clone_note: clone-start creates \$SOURCE_PROFILE-<N>; cleanup-clones keeps only source"
   log "extensions_note: start/clone-start load daily extensions via --load-extension (see list-extensions)"
   log "scope_note: this skill only opens Chrome; it does not configure MCP or run debugging"
@@ -766,6 +1011,7 @@ shift || true
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --pick-port) PICK_PORT=1 ;;
+    --force) FORCE=1 ;;
     --id)
       shift
       [[ $# -gt 0 ]] || { err "--id requires a value"; exit 1; }
@@ -789,6 +1035,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$CMD" in
+  init) cmd_init ;;
   status) cmd_status ;;
   start) cmd_start ;;
   clone-start) cmd_clone_start ;;
@@ -796,6 +1043,7 @@ case "$CMD" in
   cleanup-clones) cmd_cleanup_clones ;;
   list-extensions) cmd_list_extensions ;;
   sync-extensions) cmd_sync_extensions ;;
+  sync-app) cmd_sync_app ;;
   stop) cmd_stop ;;
   reset-profile) cmd_reset_profile ;;
   doctor) cmd_doctor ;;

@@ -44,12 +44,30 @@ scripts/chrome-debug.sh cleanup-clones       # 删掉所有 -N，只留源 profi
 
 ## 必须先关日常 Chrome 吗？
 
-**不必。** 独立 `user-data-dir` 可与日常 Chrome 并行。
+**不必。** Debug.app 的 bundle id 与日常 Chrome 不同，profile 也独立。
 
 只有这些情况才要处理已有进程：
 
 - 两个进程抢**同一个** profile 目录
 - 目标端口被无关进程占用，且你坚持用该端口
+
+## 点超链接却打开了调试 Chrome？
+
+调试进程用了日常 `/Applications/Google Chrome.app`（bundle `com.google.Chrome`）。macOS 把 `http`/`https` 派给这个 id，飞书/IDE 链接会进调试窗口或无头实例。
+
+```bash
+scripts/chrome-debug.sh stop
+scripts/chrome-debug.sh init     # 没有 Debug.app / bundle 不对 / 版本落后会拷一份
+scripts/chrome-debug.sh start    # 只会 open Debug.app；指向日常 Chrome 会被拒绝
+```
+
+确认：`init` 打印 `init: ready bundle=com.google.chrome.debug`；`doctor` 里 `isolated_app: ok`；系统「默认浏览器」仍是日常 Google Chrome。
+
+## Debug.app 从哪来？
+
+不是再下一遍安装包。`init`（缺了或过期才拷；`--force` / `sync-app` 则强制拷）把已安装的 `/Applications/Google Chrome.app` **整份 .app 拷到** `~/Applications/Google Chrome Debug.app`，改 bundle id / 显示名，关掉这份拷贝的自动更新，再 ad-hoc 签名。日常 Chrome 不动。
+
+版本落后时 `init_state: stale`。Debug 实例在跑则先 `stop` 再 `init`。
 
 ## 端口被占
 
@@ -64,7 +82,7 @@ scripts/chrome-debug.sh status
 ## start 后 CDP 不通
 
 等 1–2 秒再 `status`；仍失败则 `stop` 后重 `start`。  
-确认 `CHROME_PATH` 指向真实可执行文件。
+确认 `CHROME_APP` 是 `Google Chrome Debug.app`（`doctor` 看 `isolated_app`），且可执行文件存在。缺失则 `init`。
 
 ## 误连到 Playwright / Codex 的 Chrome
 
